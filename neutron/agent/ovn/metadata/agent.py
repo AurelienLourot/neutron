@@ -15,6 +15,7 @@
 import collections
 import functools
 import re
+import traceback
 import uuid
 
 from neutron_lib import constants as n_const
@@ -53,7 +54,9 @@ def _sync_lock(f):
     """Decorator to block all operations for a global sync call."""
     @functools.wraps(f)
     def wrapped(*args, **kwargs):
+        LOG.info('XXX _sync_lock() before write_lock()')
         with _SYNC_STATE_LOCK.write_lock():
+            LOG.info('XXX _sync_lock() after write_lock()')
             return f(*args, **kwargs)
     return wrapped
 
@@ -80,16 +83,25 @@ class PortBindingChassisEvent(row_event.RowEvent):
         resync = False
         if row.type not in OVN_VIF_PORT_TYPES:
             return
-        with _SYNC_STATE_LOCK.read_lock():
-            try:
-                net_name = ovn_utils.get_network_name_from_datapath(
-                        row.datapath)
-                LOG.info(self.LOG_MSG, row.logical_port, net_name)
-                self.agent.update_datapath(str(row.datapath.uuid), net_name)
-            except ConfigException:
-                # We're now in the reader lock mode, we need to exit the
-                # context and then use writer lock
-                resync = True
+        LOG.info('XXX run() before read_lock()')
+        try:
+            with _SYNC_STATE_LOCK.read_lock():
+                LOG.info('XXX run() after read_lock()')
+                LOG.info('XXX run() before get_network_name_from_datapath()')
+                try:
+                    net_name = ovn_utils.get_network_name_from_datapath(
+                            row.datapath)
+                    LOG.info('XXX run() after get_network_name_from_datapath()')
+                    LOG.info(self.LOG_MSG, row.logical_port, net_name)
+                    self.agent.update_datapath(str(row.datapath.uuid), net_name)
+                except ConfigException:
+                    # We're now in the reader lock mode, we need to exit the
+                    # context and then use writer lock
+                    resync = True
+        except:
+            LOG.info('XXX exception {}'.format(traceback.format_exc()))
+        finally:
+            LOG.info('XXX run() finally')
         if resync:
             self.agent.resync()
 
@@ -311,6 +323,8 @@ class MetadataAgent(object):
                              ns.startswith(NS_PREFIX) and
                              ns not in metadata_namespaces]
         for ns in unused_namespaces:
+            LOG.info("XXX Unused namespace found: {}".format(
+                self._get_datapath_name(ns)))
             self.teardown_datapath(self._get_datapath_name(ns))
 
     @staticmethod
@@ -527,14 +541,20 @@ class MetadataAgent(object):
         """
         # Retrieve all VIF ports in our Chassis
         ports = self.sb_idl.get_ports_on_chassis(self.chassis)
+        LOG.info("XXX Ports from the chassis: {}".format(str(ports)))
         nets = {(str(p.datapath.uuid),
             ovn_utils.get_network_name_from_datapath(p.datapath))
             for p in self._vif_ports(ports)}
+        LOG.info("XXX Networks: {}".format(str(nets)))
         namespaces = []
         # Make sure that all those datapaths are serving metadata
         for datapath, net_name in nets:
+            LOG.info("XXX provision datapath: {}, {}".format(
+                datapath, net_name))
             netns = self.provision_datapath(datapath, net_name)
             if netns:
                 namespaces.append(netns)
+            else:
+                LOG.info("XXX no netns: {}, {}".format(datapath, net_name))
 
         return namespaces
